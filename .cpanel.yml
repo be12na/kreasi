@@ -1,0 +1,5 @@
+---
+deployment:
+  tasks:
+    - echo "Build output deploy: copy dist/* to root"
+    - rsync -av dist/ ./
