@@ -4,3 +4,5 @@ RewriteRule ^index\.html$ - [L]
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule . /kreasi/index.html [L]
+AddType application/javascript .js
+AddType text/css .css
