@@ -1,0 +1,48 @@
+name: Build & Deploy Kreasi Fashion
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kreasi-dist
+          path: dist/
+          retention-days: 30
+
+      # --- Auto-deploy ke cPanel via FTP (optional) ---
+      # Uncomment bagian di bawah & set secrets di GitHub repo settings:
+      #   FTP_SERVER, FTP_USERNAME, FTP_PASSWORD
+      #
+      # - name: Deploy to cPanel via FTP
+      #   uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+      #   with:
+      #     server: ${{ secrets.FTP_SERVER }}
+      #     username: ${{ secrets.FTP_USERNAME }}
+      #     password: ${{ secrets.FTP_PASSWORD }}
+      #     local-dir: ./dist/
+      #     server-dir: /public_html/kreasi/
+      #     dangerous-clean-slate: false

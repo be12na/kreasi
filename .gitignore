@@ -11,6 +11,12 @@ node_modules
 dist-ssr
 *.local
 
+# Environment variables (jangan push API key!)
+.env
+.env.local
+.env.production
+.env.*.local
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
