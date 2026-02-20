@@ -1,0 +1,22 @@
+RewriteEngine On
+RewriteBase /kreasi/
+
+# Rewrite semua request ke folder dist/
+# Jika file ada di dist/, serve dari sana
+RewriteCond %{REQUEST_URI} ^/kreasi/(.*)$
+RewriteCond %{DOCUMENT_ROOT}/kreasi/dist/%1 -f
+RewriteRule ^(.*)$ dist/$1 [L]
+
+# Jika directory ada di dist/, serve dari sana
+RewriteCond %{REQUEST_URI} ^/kreasi/(.*)$
+RewriteCond %{DOCUMENT_ROOT}/kreasi/dist/%1 -d
+RewriteRule ^(.*)$ dist/$1 [L]
+
+# Untuk semua request lain (SPA fallback), serve dist/index.html
+RewriteCond %{REQUEST_URI} !^/kreasi/dist/
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ dist/index.html [L]
+
+# Jika request langsung ke root /kreasi/ tanpa file spesifik
+RewriteRule ^$ dist/index.html [L]
