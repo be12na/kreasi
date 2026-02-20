@@ -1,22 +1,34 @@
+DirectoryIndex dist/index.html
+
 RewriteEngine On
-RewriteBase /kreasi/
 
-# Rewrite semua request ke folder dist/
-# Jika file ada di dist/, serve dari sana
-RewriteCond %{REQUEST_URI} ^/kreasi/(.*)$
-RewriteCond %{DOCUMENT_ROOT}/kreasi/dist/%1 -f
-RewriteRule ^(.*)$ dist/$1 [L]
+# Jangan rewrite jika sudah menuju dist/
+RewriteRule ^dist/ - [L]
 
-# Jika directory ada di dist/, serve dari sana
-RewriteCond %{REQUEST_URI} ^/kreasi/(.*)$
-RewriteCond %{DOCUMENT_ROOT}/kreasi/dist/%1 -d
-RewriteRule ^(.*)$ dist/$1 [L]
+# Rewrite assets/ ke dist/assets/
+RewriteRule ^assets/(.*)$ dist/assets/$1 [L]
 
-# Untuk semua request lain (SPA fallback), serve dist/index.html
-RewriteCond %{REQUEST_URI} !^/kreasi/dist/
+# Semua request lainnya -> dist/index.html (SPA fallback)
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^ dist/index.html [L]
+RewriteRule ^(.*)$ dist/index.html [L]
 
-# Jika request langsung ke root /kreasi/ tanpa file spesifik
-RewriteRule ^$ dist/index.html [L]
+# MIME types untuk JS modules
+AddType application/javascript .js
+AddType text/css .css
+
+# Enable GZIP compression
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css application/javascript application/json image/svg+xml
+</IfModule>
+
+# Cache static assets
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/jpeg "access plus 1 year"
+  ExpiresByType image/webp "access plus 1 year"
+  ExpiresByType font/woff2 "access plus 1 year"
+</IfModule>
