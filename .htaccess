@@ -1,20 +1,16 @@
-DirectoryIndex dist/index.html
-
 RewriteEngine On
+RewriteBase /kreasi/
 
-# Jangan rewrite jika sudah menuju dist/
-RewriteRule ^dist/ - [L]
+# Jika file atau folder ada, serve langsung
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
 
-# Rewrite assets/ ke dist/assets/
-RewriteRule ^assets/(.*)$ dist/assets/$1 [L]
-
-# Semua request lainnya -> dist/index.html (SPA fallback)
-RewriteCond %{REQUEST_FILENAME} !-f
-RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^(.*)$ dist/index.html [L]
+# SPA fallback: semua route lain -> index.html
+RewriteRule ^ index.html [L]
 
 # MIME types untuk JS modules
-AddType application/javascript .js
+AddType application/javascript .js .mjs
 AddType text/css .css
 
 # Enable GZIP compression

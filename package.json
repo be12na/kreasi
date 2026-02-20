@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --open dev.html",
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "powershell -ExecutionPolicy Bypass -File deploy.ps1"
