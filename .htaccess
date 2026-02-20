@@ -1,13 +1,16 @@
 RewriteEngine On
 RewriteBase /kreasi/
 
+# Prioritaskan index.php sebagai directory index
+DirectoryIndex index.php index.html
+
 # Jika file atau folder ada, serve langsung
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
-# SPA fallback: semua route lain -> index.html
-RewriteRule ^ index.html [L]
+# SPA fallback: semua route lain -> index.php (yang serve dist/index.html)
+RewriteRule ^ index.php [L]
 
 # MIME types untuk JS modules
 AddType application/javascript .js .mjs
@@ -18,7 +21,7 @@ AddType text/css .css
   AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css application/javascript application/json image/svg+xml
 </IfModule>
 
-# Cache static assets
+# Cache static assets (JS/CSS punya hash, jadi bisa cache agresif)
 <IfModule mod_expires.c>
   ExpiresActive On
   ExpiresByType text/css "access plus 1 year"
@@ -27,4 +30,13 @@ AddType text/css .css
   ExpiresByType image/jpeg "access plus 1 year"
   ExpiresByType image/webp "access plus 1 year"
   ExpiresByType font/woff2 "access plus 1 year"
+</IfModule>
+
+# Jangan cache HTML (supaya update langsung terlihat)
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|php)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
 </IfModule>
