@@ -3,34 +3,34 @@ import fs from 'fs';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Plugin: copy dist/ output to project root after build (for cPanel git deploy)
-function copyDistToRoot(): import('vite').Plugin {
+// Plugin: generate root index.html that loads dist/ assets (for cPanel git deploy)
+function generateRootIndex(): import('vite').Plugin {
   return {
-    name: 'copy-dist-to-root',
+    name: 'generate-root-index',
     closeBundle() {
       const distDir = path.resolve(__dirname, 'dist');
       const rootDir = path.resolve(__dirname);
 
-      // Copy dist/dev.html -> root/index.html (rename for production)
+      // Read the built HTML from dist/dev.html
       const srcHtml = path.join(distDir, 'dev.html');
-      const destHtml = path.join(rootDir, 'index.html');
-      if (fs.existsSync(srcHtml)) {
-        fs.copyFileSync(srcHtml, destHtml);
-        // Also rename in dist/ for consistency
-        fs.renameSync(srcHtml, path.join(distDir, 'index.html'));
-        console.log('\n✅ Copied dist/dev.html -> index.html');
+      if (!fs.existsSync(srcHtml)) {
+        console.warn('⚠️ dist/dev.html not found, skipping root index.html generation');
+        return;
       }
 
-      // Copy dist/assets/ -> root/assets/
-      const srcAssets = path.join(distDir, 'assets');
-      const destAssets = path.join(rootDir, 'assets');
-      if (fs.existsSync(srcAssets)) {
-        if (!fs.existsSync(destAssets)) fs.mkdirSync(destAssets, { recursive: true });
-        for (const file of fs.readdirSync(srcAssets)) {
-          fs.copyFileSync(path.join(srcAssets, file), path.join(destAssets, file));
-        }
-        console.log('✅ Copied dist/assets/ -> assets/');
-      }
+      let html = fs.readFileSync(srcHtml, 'utf-8');
+      
+      // Fix asset paths: /kreasi/assets/ -> /kreasi/dist/assets/
+      // This way assets load from dist/ subfolder on the server
+      html = html.replace(/\/kreasi\/assets\//g, '/kreasi/dist/assets/');
+      
+      // Write to root index.html
+      fs.writeFileSync(path.join(rootDir, 'index.html'), html, 'utf-8');
+      console.log('\n✅ Generated root index.html (pointing to dist/assets/)');
+      
+      // Also rename dist/dev.html -> dist/index.html for direct access
+      fs.renameSync(srcHtml, path.join(distDir, 'index.html'));
+      console.log('✅ Renamed dist/dev.html -> dist/index.html');
       console.log('🚀 Build ready for cPanel deployment!\n');
     }
   };
@@ -47,7 +47,7 @@ export default defineConfig(({ mode }) => {
       },
       plugins: [
         react(),
-        isProduction && copyDistToRoot(),
+        isProduction && generateRootIndex(),
       ].filter(Boolean),
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
