@@ -1,15 +1,23 @@
+# Disable LiteSpeed Cache for this directory
+<IfModule LiteSpeed>
+  CacheLookup off
+</IfModule>
+
 RewriteEngine On
 RewriteBase /kreasi/
 
-# Prioritaskan index.php sebagai directory index
-DirectoryIndex index.php index.html
+# Force index.php as the ONLY directory index (override server default)
+DirectoryIndex index.php
 
-# Jika file atau folder ada, serve langsung
+# Jika akses root (/kreasi/) -> langsung ke index.php
+RewriteRule ^$ index.php [L]
+
+# Jika file atau folder ada, serve langsung  
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
-# SPA fallback: semua route lain -> index.php (yang serve dist/index.html)
+# SPA fallback: semua route lain -> index.php
 RewriteRule ^ index.php [L]
 
 # MIME types untuk JS modules
@@ -32,7 +40,7 @@ AddType text/css .css
   ExpiresByType font/woff2 "access plus 1 year"
 </IfModule>
 
-# Jangan cache HTML (supaya update langsung terlihat)
+# Jangan cache HTML/PHP (supaya update langsung terlihat)
 <IfModule mod_headers.c>
   <FilesMatch "\.(html|php)$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"
