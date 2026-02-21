@@ -2,6 +2,14 @@ import { GoogleGenAI, Modality } from "@google/genai";
 import type { GenerateContentResponse, Part, GenerateImagesResponse } from "@google/genai";
 import type { ImageData, Look } from "../types";
 
+// ===== Model Configuration (Free Tier Compatible) =====
+// Image generation model — must support responseModalities IMAGE
+const IMAGE_MODEL = 'gemini-2.0-flash-exp';
+// Text-only model for video prompt generation
+const TEXT_MODEL = 'gemini-2.0-flash';
+// Max images per generation batch (free tier friendly)
+const MAX_IMAGES_PER_BATCH = 3;
+
 // ===== Multi-Key Management =====
 let apiKeys: string[] = [];
 let currentKeyIndex = 0;
@@ -54,14 +62,19 @@ const isRateLimitError = (msg: string): boolean => {
 };
 
 const isKeyInvalidError = (msg: string): boolean => {
-  return msg.includes('api key not valid') || msg.includes('permission denied');
+  return msg.includes('api key not valid') || msg.includes('permission denied') || msg.includes('api_key_invalid');
+};
+
+// Model not available errors — should not retry or failover
+const isModelError = (msg: string): boolean => {
+  return (msg.includes('model') && (msg.includes('not found') || msg.includes('not supported'))) || msg.includes('404');
 };
 
 // Execute with auto-failover + retry with exponential backoff
 const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
   let lastError: Error | null = null;
-  const MAX_RETRIES_PER_KEY = 3;
-  const BASE_DELAY_MS = 5000; // 5 seconds base delay for rate limit
+  const MAX_RETRIES_PER_KEY = 4;
+  const BASE_DELAY_MS = 15000; // 15 seconds base delay for rate limit (free tier needs longer waits)
 
   // Try each key
   for (let keyAttempt = 0; keyAttempt < apiKeys.length; keyAttempt++) {
@@ -81,6 +94,11 @@ const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Prom
           console.warn(`API Key #${keyAttempt + 1} tidak valid, pindah ke key berikutnya...`);
           markKeyFailed(key);
           break; // Exit retry loop, try next key
+        }
+
+        // Model not available → throw immediately, no retry
+        if (isModelError(msg)) {
+          throw new Error(`Model AI tidak tersedia: ${lastError.message}. Pastikan API Key-mu dari Google AI Studio.`);
         }
 
         // Rate limit → retry with backoff on same key
@@ -120,7 +138,7 @@ const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Prom
 
 // Run tasks sequentially with delay between each to avoid rate limits
 // Returns partial results (successful ones) instead of failing everything
-const runSequential = async <T>(tasks: (() => Promise<T>)[], delayBetweenMs: number = 2000): Promise<T[]> => {
+const runSequential = async <T>(tasks: (() => Promise<T>)[], delayBetweenMs: number = 6000): Promise<T[]> => {
   const results: T[] = [];
   for (let i = 0; i < tasks.length; i++) {
     try {
@@ -143,29 +161,20 @@ const runSequential = async <T>(tasks: (() => Promise<T>)[], delayBetweenMs: num
 
 const lookPrompts = [
   "in a confident walking pose on a city street, full-body shot.",
-  "sitting elegantly at an outdoor cafe, medium shot.",
   "in a dynamic studio shot with a solid, light-colored background.",
-  "leaning against a rustic brick wall, casual pose.",
   "in a close-up shot focusing on the details of the fashion item.",
-  "in a minimalist indoor setting with natural light, looking away from the camera.",
 ];
 
 const brollPrompts = [
   "in an extreme close-up shot, highlighting the material, texture, and intricate details of the product.",
-  "photographed from a dramatic low-angle, making the product appear monumental and aspirational.",
-  "in an artfully arranged flat lay composition, surrounded by subtle props that complement the product's function and aesthetic.",
   "showcased on a geometric pedestal (e.g., marble, wood, or metal) with professional, focused studio lighting that creates elegant shadows.",
   "in a contextually relevant lifestyle scene. The background should logically match the product's category (e.g., a stylish desk for a gadget, a serene bathroom for a cosmetic product).",
-  "deconstructed or with its components elegantly laid out, revealing its inner workings or ingredients in a visually appealing way.",
 ];
 
 const posePrompts = [
     "striking a dynamic action pose, as if captured mid-motion.",
-    "in a relaxed, seated pose on a minimalist chair or stool.",
     "a powerful, confident stance with hands on hips.",
     "a graceful, elegant pose with arms outstretched or in a dance-like position.",
-    "a thoughtful, contemplative pose, looking away from the camera.",
-    "a close-up beauty shot, focusing on the face and shoulders with a subtle expression.",
 ];
 
 const campaignKitFormats = [
@@ -190,13 +199,16 @@ const parseAndThrowEnhancedError = (error: unknown) => {
     if (error instanceof Error) {
         const message = error.message.toLowerCase();
         if (message.includes('api key not valid')) {
-            throw new Error('API Key-mu nggak valid nih. Coba cek lagi ya.');
+            throw new Error('API Key-mu nggak valid nih. Coba cek lagi ya, atau buat key baru di aistudio.google.com/apikey');
         }
         if (message.includes('permission denied') || message.includes('origin')) {
-            throw new Error('Request API-mu diblokir. Kayaknya API Key kamu ada batasan domain. Coba cek Google Cloud Console-mu buat mastiin domain kamu udah di-whitelist.');
+            throw new Error('Request API-mu diblokir. Coba buat API Key baru tanpa batasan domain di Google Cloud Console.');
         }
-        if (message.includes('quota')) {
-            throw new Error('Waduh, kuota API kamu habis. Coba cek limit pemakaian di akun Google Cloud-mu ya.');
+        if (message.includes('quota') || message.includes('rate limit') || message.includes('resource exhausted') || message.includes('429')) {
+            throw new Error('Kuota API habis. Free tier Gemini punya limit harian. Coba tunggu 1-2 menit, atau buat API Key baru dari akun Google yang berbeda.');
+        }
+        if (message.includes('model') && (message.includes('not found') || message.includes('not supported'))) {
+            throw new Error('Model AI tidak tersedia di API Key kamu. Pastikan kamu pakai API Key dari aistudio.google.com/apikey (bukan Google Cloud biasa).');
         }
         // If the error is one of our custom, more specific errors, just re-throw it
         throw error;
@@ -282,11 +294,12 @@ const generateSingleLook = async (
 
   return withFailover(async (ai) => {
     const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: IMAGE_MODEL,
       contents: {
         parts: parts,
       },
       config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
         imageConfig: {
           aspectRatio: "9:16"
         }
@@ -335,11 +348,12 @@ const generateSingleBrollShot = async (
 
   return withFailover(async (ai) => {
     const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: IMAGE_MODEL,
       contents: {
         parts: [productImagePart, textPart],
       },
       config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
         imageConfig: {
           aspectRatio: "9:16"
         }
@@ -386,11 +400,12 @@ const generateSinglePose = async (
 
   return withFailover(async (ai) => {
     const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: IMAGE_MODEL,
       contents: {
         parts: [modelImagePart, textPart],
       },
       config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
         imageConfig: {
           aspectRatio: "9:16"
         }
@@ -430,7 +445,8 @@ export const generateScene = async (
       throw new Error("Scene prompt tidak boleh kosong.");
     }
 
-    const tasks = Array(4).fill(0).map((_, i) => () => {
+    const numImages = Math.min(MAX_IMAGES_PER_BATCH, 2);
+    const tasks = Array(numImages).fill(0).map((_, i) => () => {
       const prompt = `Create a photorealistic image placing the main subject from the provided image into the following scene: "${scenePrompt}". Ensure the lighting, shadows, and perspective on the subject are perfectly blended with the new background. Introduce a slight variation in composition or angle for version ${i + 1}.`;
       
       const imagePart: Part = {
@@ -440,9 +456,10 @@ export const generateScene = async (
 
       return withFailover(async (ai) => {
         const response: GenerateContentResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
+          model: IMAGE_MODEL,
           contents: { parts: [imagePart, textPart] },
           config: { 
+            responseModalities: [Modality.IMAGE, Modality.TEXT],
             imageConfig: {
               aspectRatio: "9:16"
             } 
@@ -460,7 +477,6 @@ export const generateScene = async (
   }
 };
 
-// FIX: Switched from generateImages to generateContent for image-to-image tasks. This resolves the error from passing an 'image' parameter to generateImages.
 export const generateCampaignKit = async (
   productImage: ImageData,
   theme: string,
@@ -477,9 +493,10 @@ export const generateCampaignKit = async (
 
       return withFailover(async (ai) => {
         const response: GenerateContentResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
+          model: IMAGE_MODEL,
           contents: { parts: [imagePart, textPart] },
           config: {
+            responseModalities: [Modality.IMAGE, Modality.TEXT],
             imageConfig: {
               aspectRatio: format.ratio as "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
             }
@@ -509,7 +526,8 @@ export const generateThemeExploration = async (
       throw new Error("Gaya artistik tidak valid.");
     }
     
-    const tasks = Array(4).fill(0).map((_, i) => () => {
+    const numImages = Math.min(MAX_IMAGES_PER_BATCH, 2);
+    const tasks = Array(numImages).fill(0).map((_, i) => () => {
       const prompt = `Recreate the provided image in this artistic style: "${stylePrompt}". Introduce a slight variation for version ${i + 1}.`;
       
       const imagePart: Part = {
@@ -519,9 +537,10 @@ export const generateThemeExploration = async (
 
       return withFailover(async (ai) => {
         const response: GenerateContentResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
+          model: IMAGE_MODEL,
           contents: { parts: [imagePart, textPart] },
           config: {
+            responseModalities: [Modality.IMAGE, Modality.TEXT],
             imageConfig: {
               aspectRatio: "1:1"
             }
@@ -556,7 +575,7 @@ export const generateVideoPrompt = async (
 
         return withFailover(async (ai) => {
             const response: GenerateContentResponse = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
+                model: TEXT_MODEL,
                 contents: {
                     parts: [imagePart, textPart],
                 },
