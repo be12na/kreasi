@@ -1,5 +1,7 @@
 ---
 deployment:
   tasks:
-    - echo "Build output deploy: copy dist/* to root"
-    - rsync -av dist/ ./
+    # Remove conflicting untracked files before merge
+    - /usr/local/cpanel/3rdparty/bin/git checkout -- . || true
+    - /usr/local/cpanel/3rdparty/bin/git clean -fd || true
+    - echo "Deployment complete"
