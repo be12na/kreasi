@@ -3,60 +3,146 @@ import type { GenerateContentResponse, Part, GenerateImagesResponse } from "@goo
 import type { ImageData, Look } from "../types";
 
 // ===== Model Configuration (Free Tier Compatible) =====
-// Image generation model — must support responseModalities IMAGE
 const IMAGE_MODEL = 'gemini-2.0-flash-exp';
-// Text-only model for video prompt generation
 const TEXT_MODEL = 'gemini-2.0-flash';
-// Max images per generation batch (free tier friendly)
 const MAX_IMAGES_PER_BATCH = 3;
 
-// ===== Multi-Key Management =====
-let apiKeys: string[] = [];
-let currentKeyIndex = 0;
-let failedKeys = new Set<string>();
+// ===== Rate Limits per Model (Free Tier) =====
+// Source: https://ai.google.dev/gemini-api/docs/rate-limits
+const RATE_LIMITS: Record<string, { rpm: number; rpd: number }> = {
+  'gemini-2.0-flash-exp': { rpm: 10, rpd: 1500 },
+  'gemini-2.0-flash':     { rpm: 15, rpd: 1500 },
+  'gemini-2.5-flash':     { rpm: 10, rpd: 500 },
+};
+const DEFAULT_RPM = 10;
+const SAFETY_THRESHOLD = 0.85; // Use max 85% of limit before rotating
 
-export const setApiKeys = (keys: string[]) => {
-  apiKeys = keys.filter(k => k.trim().length > 0);
-  currentKeyIndex = 0;
-  failedKeys.clear();
+// ===== Key Pool with Metadata =====
+interface KeyEntry {
+  id: string;
+  apiKey: string;
+  status: 'active' | 'invalid' | 'cooldown';
+  cooldownUntil: number; // timestamp ms
+}
+
+let keyPool: KeyEntry[] = [];
+
+// ===== In-Memory Rate Monitor (per-minute window) =====
+// Map<keyId, Map<windowKey, count>>
+const usageMap = new Map<string, Map<string, number>>();
+
+const getWindowKey = (): string => {
+  return String(Math.floor(Date.now() / 1000 / 60)); // 1-minute window
 };
 
-export const getApiKeys = (): string[] => apiKeys;
+const incrementUsage = (keyId: string): number => {
+  const window = getWindowKey();
+  if (!usageMap.has(keyId)) {
+    usageMap.set(keyId, new Map());
+  }
+  const keyUsage = usageMap.get(keyId)!;
+  
+  // Clean old windows (keep only current and previous)
+  for (const [k] of keyUsage) {
+    if (k !== window && k !== String(parseInt(window) - 1)) {
+      keyUsage.delete(k);
+    }
+  }
+  
+  const current = (keyUsage.get(window) || 0) + 1;
+  keyUsage.set(window, current);
+  return current;
+};
 
-const getNextValidKey = (): string => {
-  if (apiKeys.length === 0) {
+const getUsage = (keyId: string): number => {
+  const window = getWindowKey();
+  return usageMap.get(keyId)?.get(window) || 0;
+};
+
+// ===== Public API =====
+export const setApiKeys = (keys: string[]) => {
+  const validKeys = keys.filter(k => k.trim().length > 0);
+  keyPool = validKeys.map((key, i) => ({
+    id: `key_${i}`,
+    apiKey: key,
+    status: 'active' as const,
+    cooldownUntil: 0,
+  }));
+  usageMap.clear();
+  console.log(`[KeyPool] ${keyPool.length} API key(s) loaded`);
+};
+
+export const getApiKeys = (): string[] => keyPool.map(k => k.apiKey);
+
+// ===== Smart Key Selector (Rotator) =====
+// Picks the key with lowest usage that's under safety threshold
+const selectKey = (model: string = IMAGE_MODEL): KeyEntry => {
+  if (keyPool.length === 0) {
     throw new Error('Belum ada API Key. Silakan masukkan API Key Gemini terlebih dahulu.');
   }
 
-  // Try to find a key that hasn't permanently failed
-  for (let i = 0; i < apiKeys.length; i++) {
-    const idx = (currentKeyIndex + i) % apiKeys.length;
-    if (!failedKeys.has(apiKeys[idx])) {
-      currentKeyIndex = idx;
-      return apiKeys[idx];
+  const now = Date.now();
+  const rpmLimit = RATE_LIMITS[model]?.rpm || DEFAULT_RPM;
+  const safeRpm = Math.floor(rpmLimit * SAFETY_THRESHOLD);
+
+  // 1. Find active keys under safety threshold
+  const candidates = keyPool.filter(k => {
+    if (k.status === 'invalid') return false;
+    if (k.status === 'cooldown' && k.cooldownUntil > now) return false;
+    // Auto-recover from cooldown
+    if (k.status === 'cooldown' && k.cooldownUntil <= now) {
+      k.status = 'active';
     }
+    const usage = getUsage(k.id);
+    return usage < safeRpm;
+  });
+
+  if (candidates.length > 0) {
+    // Pick the one with lowest usage
+    candidates.sort((a, b) => getUsage(a.id) - getUsage(b.id));
+    const selected = candidates[0];
+    console.log(`[Rotator] Selected ${selected.id} (usage: ${getUsage(selected.id)}/${safeRpm} safe RPM)`);
+    return selected;
   }
 
-  // All keys failed, reset and try from beginning
-  failedKeys.clear();
-  currentKeyIndex = 0;
-  return apiKeys[0];
+  // 2. All keys at/above threshold — find any non-invalid key (will wait)
+  const anyActive = keyPool.filter(k => k.status !== 'invalid');
+  if (anyActive.length > 0) {
+    // Pick the one closest to cooldown end, or lowest usage
+    anyActive.sort((a, b) => {
+      if (a.status === 'cooldown' && b.status === 'cooldown') {
+        return a.cooldownUntil - b.cooldownUntil;
+      }
+      return getUsage(a.id) - getUsage(b.id);
+    });
+    console.log(`[Rotator] All keys near limit, using ${anyActive[0].id} (usage: ${getUsage(anyActive[0].id)})`);
+    return anyActive[0];
+  }
+
+  // 3. All keys invalid — reset and try first (user may have fixed keys)
+  keyPool.forEach(k => { k.status = 'active'; k.cooldownUntil = 0; });
+  usageMap.clear();
+  return keyPool[0];
 };
 
-const markKeyFailed = (key: string) => {
-  failedKeys.add(key);
-  // Move to next key
-  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
+const markKeyInvalid = (entry: KeyEntry) => {
+  entry.status = 'invalid';
+  console.warn(`[KeyPool] ${entry.id} marked INVALID`);
+};
+
+const markKeyCooldown = (entry: KeyEntry, cooldownMs: number = 60000) => {
+  entry.status = 'cooldown';
+  entry.cooldownUntil = Date.now() + cooldownMs;
+  console.warn(`[KeyPool] ${entry.id} in COOLDOWN for ${cooldownMs / 1000}s`);
 };
 
 const createAiClient = (apiKey: string): GoogleGenAI => {
   return new GoogleGenAI({ apiKey });
 };
 
-// Delay helper
+// ===== Helpers =====
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Check if error is a rate limit / quota / transient error worth retrying
 const isRateLimitError = (msg: string): boolean => {
   return msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted') || msg.includes('429') || msg.includes('too many requests');
 };
@@ -65,94 +151,103 @@ const isKeyInvalidError = (msg: string): boolean => {
   return msg.includes('api key not valid') || msg.includes('permission denied') || msg.includes('api_key_invalid');
 };
 
-// Model not available errors — should not retry or failover
 const isModelError = (msg: string): boolean => {
   return (msg.includes('model') && (msg.includes('not found') || msg.includes('not supported'))) || msg.includes('404');
 };
 
-// Execute with auto-failover + retry with exponential backoff
-const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
+// ===== Smart Failover with Rate Monitoring =====
+const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>, model: string = IMAGE_MODEL): Promise<T> => {
   let lastError: Error | null = null;
-  const MAX_RETRIES_PER_KEY = 4;
-  const BASE_DELAY_MS = 15000; // 15 seconds base delay for rate limit (free tier needs longer waits)
+  const MAX_RETRIES = 3;
+  const activeKeyCount = keyPool.filter(k => k.status !== 'invalid').length;
+  const maxAttempts = Math.max(activeKeyCount, 1) * MAX_RETRIES;
 
-  // Try each key
-  for (let keyAttempt = 0; keyAttempt < apiKeys.length; keyAttempt++) {
-    const key = getNextValidKey();
-    const ai = createAiClient(key);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const entry = selectKey(model);
+    const ai = createAiClient(entry.apiKey);
 
-    // Retry loop per key (for rate limit / transient errors)
-    for (let retry = 0; retry < MAX_RETRIES_PER_KEY; retry++) {
-      try {
-        return await operation(ai);
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        const msg = lastError.message.toLowerCase();
+    try {
+      // Track usage BEFORE the call
+      const currentUsage = incrementUsage(entry.id);
+      const rpmLimit = RATE_LIMITS[model]?.rpm || DEFAULT_RPM;
+      console.log(`[Monitor] ${entry.id} request #${currentUsage} this minute (limit: ${rpmLimit} RPM)`);
 
-        // Invalid key → mark failed, switch to next key immediately
-        if (isKeyInvalidError(msg)) {
-          console.warn(`API Key #${keyAttempt + 1} tidak valid, pindah ke key berikutnya...`);
-          markKeyFailed(key);
-          break; // Exit retry loop, try next key
-        }
+      const result = await operation(ai);
+      return result;
 
-        // Model not available → throw immediately, no retry
-        if (isModelError(msg)) {
-          throw new Error(`Model AI tidak tersedia: ${lastError.message}. Pastikan API Key-mu dari Google AI Studio.`);
-        }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const msg = lastError.message.toLowerCase();
 
-        // Rate limit → retry with backoff on same key
-        if (isRateLimitError(msg)) {
-          const waitTime = BASE_DELAY_MS * Math.pow(2, retry); // 5s, 10s, 20s
-          console.warn(`Rate limit pada Key #${keyAttempt + 1}, retry ${retry + 1}/${MAX_RETRIES_PER_KEY} setelah ${waitTime / 1000}s...`);
-          await delay(waitTime);
-          continue; // Retry same key
-        }
-
-        // Other errors (safety, content, etc) → don't retry
-        throw lastError;
+      // Invalid key → mark permanently failed, try next
+      if (isKeyInvalidError(msg)) {
+        markKeyInvalid(entry);
+        console.warn(`[Failover] ${entry.id} invalid, trying next key...`);
+        continue;
       }
-    }
 
-    // If we exhausted retries for this key on rate limit, try next key
-    if (lastError && isRateLimitError(lastError.message.toLowerCase())) {
-      console.warn(`Key #${keyAttempt + 1} masih rate limited setelah ${MAX_RETRIES_PER_KEY} percobaan, pindah ke key berikutnya...`);
-      markKeyFailed(key);
-      continue;
+      // Model error → no point retrying
+      if (isModelError(msg)) {
+        throw new Error(`Model AI tidak tersedia: ${lastError.message}. Pastikan API Key dari Google AI Studio.`);
+      }
+
+      // Rate limit → put key on cooldown, wait, try another key
+      if (isRateLimitError(msg)) {
+        const cooldownMs = 60000 + (attempt * 15000); // 60s + 15s per attempt
+        markKeyCooldown(entry, cooldownMs);
+        
+        // Wait before trying next key
+        const waitMs = Math.min(15000 + (attempt * 5000), 60000); // 15s to 60s
+        console.warn(`[Failover] Rate limit on ${entry.id}, waiting ${waitMs / 1000}s before next attempt...`);
+        await delay(waitMs);
+        continue;
+      }
+
+      // Other errors (safety, content, etc.) — don't retry
+      throw lastError;
     }
   }
 
-  // All keys exhausted
+  // All attempts exhausted
   if (lastError) {
     const msg = lastError.message.toLowerCase();
     if (isKeyInvalidError(msg)) {
-      throw new Error('Semua API Key tidak valid. Coba cek atau ganti API Key-mu.');
+      throw new Error('Semua API Key tidak valid. Coba cek atau ganti API Key di aistudio.google.com/apikey');
     }
     if (isRateLimitError(msg)) {
-      throw new Error('Semua API Key kena rate limit. Coba tunggu 1-2 menit lalu coba lagi, atau tambah API Key dari akun Google berbeda.');
+      throw new Error('Semua API Key kena rate limit. Tunggu 1-2 menit lalu coba lagi, atau tambah API Key dari akun Google berbeda.');
     }
     throw lastError;
   }
   throw new Error('Tidak ada API Key yang tersedia.');
 };
 
-// Run tasks sequentially with delay between each to avoid rate limits
-// Returns partial results (successful ones) instead of failing everything
-const runSequential = async <T>(tasks: (() => Promise<T>)[], delayBetweenMs: number = 6000): Promise<T[]> => {
+// ===== Sequential Runner with Smart Delay =====
+// Calculates delay based on RPM to stay under limit
+const runSequential = async <T>(tasks: (() => Promise<T>)[], model: string = IMAGE_MODEL): Promise<T[]> => {
   const results: T[] = [];
+  const rpmLimit = RATE_LIMITS[model]?.rpm || DEFAULT_RPM;
+  const totalKeys = keyPool.filter(k => k.status !== 'invalid').length || 1;
+  // Effective RPM across all keys, with safety margin
+  const effectiveRpm = rpmLimit * totalKeys * SAFETY_THRESHOLD;
+  // Minimum delay between requests to stay under limit
+  const minDelayMs = Math.max(Math.ceil(60000 / effectiveRpm), 4000);
+
+  console.log(`[Sequential] ${tasks.length} tasks, ${totalKeys} key(s), effective RPM: ${effectiveRpm.toFixed(0)}, delay: ${minDelayMs / 1000}s`);
+
   for (let i = 0; i < tasks.length; i++) {
     try {
       const result = await tasks[i]();
       results.push(result);
     } catch (error) {
-      console.warn(`Task ${i + 1}/${tasks.length} gagal:`, error instanceof Error ? error.message : error);
-      // If first task fails, throw immediately (likely a permanent error)
+      console.warn(`[Sequential] Task ${i + 1}/${tasks.length} gagal:`, error instanceof Error ? error.message : error);
+      // If first task fails, throw (likely permanent error)
       if (i === 0 && results.length === 0) throw error;
       // Otherwise continue with remaining tasks
     }
-    // Add delay between requests (not after the last one)
+    // Delay between requests (not after last)
     if (i < tasks.length - 1) {
-      await delay(delayBetweenMs);
+      await delay(minDelayMs);
     }
   }
   return results;
@@ -595,7 +690,7 @@ export const generateVideoPrompt = async (
                 throw new Error("AI gagal membuat prompt video. Responsnya kosong nih.");
             }
             return videoPrompt;
-        });
+        }, TEXT_MODEL);
 
     } catch (error) {
         parseAndThrowEnhancedError(error);
