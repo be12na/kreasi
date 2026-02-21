@@ -3,14 +3,13 @@ import type { GenerateContentResponse, Part, GenerateImagesResponse } from "@goo
 import type { ImageData, Look } from "../types";
 
 // ===== Model Configuration (Free Tier Compatible) =====
-const IMAGE_MODEL = 'gemini-2.0-flash-exp';
+const IMAGE_MODEL = 'gemini-2.0-flash';
 const TEXT_MODEL = 'gemini-2.0-flash';
 const MAX_IMAGES_PER_BATCH = 3;
 
 // ===== Rate Limits per Model (Free Tier) =====
 // Source: https://ai.google.dev/gemini-api/docs/rate-limits
 const RATE_LIMITS: Record<string, { rpm: number; rpd: number }> = {
-  'gemini-2.0-flash-exp': { rpm: 10, rpd: 1500 },
   'gemini-2.0-flash':     { rpm: 15, rpd: 1500 },
   'gemini-2.5-flash':     { rpm: 10, rpd: 500 },
 };
