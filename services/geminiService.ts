@@ -45,47 +45,99 @@ const createAiClient = (apiKey: string): GoogleGenAI => {
   return new GoogleGenAI({ apiKey });
 };
 
-// Execute with auto-failover across multiple API keys
+// Delay helper
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Check if error is a rate limit / quota / transient error worth retrying
+const isRateLimitError = (msg: string): boolean => {
+  return msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted') || msg.includes('429') || msg.includes('too many requests');
+};
+
+const isKeyInvalidError = (msg: string): boolean => {
+  return msg.includes('api key not valid') || msg.includes('permission denied');
+};
+
+// Execute with auto-failover + retry with exponential backoff
 const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
   let lastError: Error | null = null;
-  const triedKeys = new Set<string>();
+  const MAX_RETRIES_PER_KEY = 3;
+  const BASE_DELAY_MS = 5000; // 5 seconds base delay for rate limit
 
-  for (let attempt = 0; attempt < apiKeys.length; attempt++) {
+  // Try each key
+  for (let keyAttempt = 0; keyAttempt < apiKeys.length; keyAttempt++) {
     const key = getNextValidKey();
-    if (triedKeys.has(key)) break; // Already tried this key
-    triedKeys.add(key);
-
     const ai = createAiClient(key);
-    try {
-      return await operation(ai);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      const msg = lastError.message.toLowerCase();
-      
-      // Only failover for key-related / quota errors
-      if (msg.includes('api key not valid') || msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted') || msg.includes('permission denied')) {
-        console.warn(`API Key #${attempt + 1} gagal (${msg.substring(0, 80)}), mencoba key berikutnya...`);
-        markKeyFailed(key);
-        continue;
+
+    // Retry loop per key (for rate limit / transient errors)
+    for (let retry = 0; retry < MAX_RETRIES_PER_KEY; retry++) {
+      try {
+        return await operation(ai);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        const msg = lastError.message.toLowerCase();
+
+        // Invalid key → mark failed, switch to next key immediately
+        if (isKeyInvalidError(msg)) {
+          console.warn(`API Key #${keyAttempt + 1} tidak valid, pindah ke key berikutnya...`);
+          markKeyFailed(key);
+          break; // Exit retry loop, try next key
+        }
+
+        // Rate limit → retry with backoff on same key
+        if (isRateLimitError(msg)) {
+          const waitTime = BASE_DELAY_MS * Math.pow(2, retry); // 5s, 10s, 20s
+          console.warn(`Rate limit pada Key #${keyAttempt + 1}, retry ${retry + 1}/${MAX_RETRIES_PER_KEY} setelah ${waitTime / 1000}s...`);
+          await delay(waitTime);
+          continue; // Retry same key
+        }
+
+        // Other errors (safety, content, etc) → don't retry
+        throw lastError;
       }
-      
-      // For other errors (safety, content, etc), don't failover
-      throw lastError;
+    }
+
+    // If we exhausted retries for this key on rate limit, try next key
+    if (lastError && isRateLimitError(lastError.message.toLowerCase())) {
+      console.warn(`Key #${keyAttempt + 1} masih rate limited setelah ${MAX_RETRIES_PER_KEY} percobaan, pindah ke key berikutnya...`);
+      markKeyFailed(key);
+      continue;
     }
   }
 
   // All keys exhausted
   if (lastError) {
     const msg = lastError.message.toLowerCase();
-    if (msg.includes('api key not valid')) {
+    if (isKeyInvalidError(msg)) {
       throw new Error('Semua API Key tidak valid. Coba cek atau ganti API Key-mu.');
     }
-    if (msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted')) {
-      throw new Error('Semua API Key sudah habis quota-nya. Tunggu beberapa menit atau tambah API Key baru.');
+    if (isRateLimitError(msg)) {
+      throw new Error('Semua API Key kena rate limit. Coba tunggu 1-2 menit lalu coba lagi, atau tambah API Key dari akun Google berbeda.');
     }
     throw lastError;
   }
   throw new Error('Tidak ada API Key yang tersedia.');
+};
+
+// Run tasks sequentially with delay between each to avoid rate limits
+// Returns partial results (successful ones) instead of failing everything
+const runSequential = async <T>(tasks: (() => Promise<T>)[], delayBetweenMs: number = 2000): Promise<T[]> => {
+  const results: T[] = [];
+  for (let i = 0; i < tasks.length; i++) {
+    try {
+      const result = await tasks[i]();
+      results.push(result);
+    } catch (error) {
+      console.warn(`Task ${i + 1}/${tasks.length} gagal:`, error instanceof Error ? error.message : error);
+      // If first task fails, throw immediately (likely a permanent error)
+      if (i === 0 && results.length === 0) throw error;
+      // Otherwise continue with remaining tasks
+    }
+    // Add delay between requests (not after the last one)
+    if (i < tasks.length - 1) {
+      await delay(delayBetweenMs);
+    }
+  }
+  return results;
 };
 
 
@@ -253,11 +305,11 @@ export const generateLookbook = async (
   lighting: string
 ): Promise<string[]> => {
   try {
-    const imagePromises = lookPrompts.map(style => 
-      generateSingleLook(modelImage, productImages, style, theme, lighting)
+    const tasks = lookPrompts.map(style => 
+      () => generateSingleLook(modelImage, productImages, style, theme, lighting)
     );
     
-    const imageUrls = await Promise.all(imagePromises);
+    const imageUrls = await runSequential(tasks);
     
     return imageUrls.filter(url => !!url);
 
@@ -304,11 +356,11 @@ export const generateBroll = async (
   lighting: string
 ): Promise<string[]> => {
   try {
-    const imagePromises = brollPrompts.map(style => 
-      generateSingleBrollShot(productImage, style, theme, lighting)
+    const tasks = brollPrompts.map(style => 
+      () => generateSingleBrollShot(productImage, style, theme, lighting)
     );
     
-    const imageUrls = await Promise.all(imagePromises);
+    const imageUrls = await runSequential(tasks);
     
     return imageUrls.filter(url => !!url);
 
@@ -355,11 +407,11 @@ export const generatePoses = async (
   lighting: string
 ): Promise<string[]> => {
   try {
-    const imagePromises = posePrompts.map(style => 
-      generateSinglePose(modelImage, style, theme, lighting)
+    const tasks = posePrompts.map(style => 
+      () => generateSinglePose(modelImage, style, theme, lighting)
     );
     
-    const imageUrls = await Promise.all(imagePromises);
+    const imageUrls = await runSequential(tasks);
     
     return imageUrls.filter(url => !!url);
 
@@ -378,7 +430,7 @@ export const generateScene = async (
       throw new Error("Scene prompt tidak boleh kosong.");
     }
 
-    const imagePromises = Array(4).fill(0).map(async (_, i) => {
+    const tasks = Array(4).fill(0).map((_, i) => () => {
       const prompt = `Create a photorealistic image placing the main subject from the provided image into the following scene: "${scenePrompt}". Ensure the lighting, shadows, and perspective on the subject are perfectly blended with the new background. Introduce a slight variation in composition or angle for version ${i + 1}.`;
       
       const imagePart: Part = {
@@ -400,7 +452,7 @@ export const generateScene = async (
       });
     });
 
-    const imageUrls = await Promise.all(imagePromises);
+    const imageUrls = await runSequential(tasks);
     return imageUrls.filter(url => !!url);
   } catch (error) {
     parseAndThrowEnhancedError(error);
@@ -415,7 +467,7 @@ export const generateCampaignKit = async (
   lighting: string
 ): Promise<Look[]> => {
   try {
-    const imagePromises = campaignKitFormats.map(async (format) => {
+    const tasks = campaignKitFormats.map((format) => () => {
       const prompt = `Generate a new, photorealistic image of ONLY the product from the provided image. Photoshoot theme: '${theme}', lighting: '${lighting}'. The overall style should be suitable for a high-end product showcase. Now, format it ${format.promptSuffix}`;
       
       const imagePart: Part = {
@@ -438,7 +490,7 @@ export const generateCampaignKit = async (
       });
     });
 
-    const results = await Promise.all(imagePromises);
+    const results = await runSequential(tasks);
     return results.filter(look => !!look.imageUrl);
   } catch (error) {
     parseAndThrowEnhancedError(error);
@@ -457,7 +509,7 @@ export const generateThemeExploration = async (
       throw new Error("Gaya artistik tidak valid.");
     }
     
-    const imagePromises = Array(4).fill(0).map(async (_, i) => {
+    const tasks = Array(4).fill(0).map((_, i) => () => {
       const prompt = `Recreate the provided image in this artistic style: "${stylePrompt}". Introduce a slight variation for version ${i + 1}.`;
       
       const imagePart: Part = {
@@ -479,7 +531,7 @@ export const generateThemeExploration = async (
       });
     });
 
-    const imageUrls = await Promise.all(imagePromises);
+    const imageUrls = await runSequential(tasks);
     return imageUrls.filter(url => !!url);
 
   } catch (error) {
