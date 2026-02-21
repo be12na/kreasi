@@ -1,14 +1,15 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
-import { generateLookbook, generateBroll, generateVideoPrompt, generatePoses, generateScene, generateCampaignKit, generateThemeExploration } from './services/geminiService';
+import { generateLookbook, generateBroll, generateVideoPrompt, generatePoses, generateScene, generateCampaignKit, generateThemeExploration, setApiKeys } from './services/geminiService';
 import type { ImageData, Look } from './types';
 import { Stepper } from './components/Stepper';
 import { Step1_ModeSelection } from './components/Step1_ModeSelection';
 import { Step2_Upload } from './components/Step2_Upload';
 import { Step3_Customize } from './components/Step3_Customize';
 import { ResultDisplay } from './components/ResultDisplay';
+import { ApiKeySetup, getStoredApiKeys } from './components/ApiKeySetup';
 
 
 export type GenerationMode = 'lookbook' | 'b-roll' | 'pose' | 'scene' | 'campaign' | 'theme';
@@ -17,6 +18,7 @@ const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const STEPS = ['Pilih Mode', 'Upload Asset', 'Kustomisasi', 'Hasil'];
 
 const App: React.FC = () => {
+  const [apiKeysReady, setApiKeysReady] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
   const [modelImage, setModelImage] = useState<ImageData | null>(null);
   const [modelImagePreview, setModelImagePreview] = useState<string | null>(null);
@@ -34,6 +36,24 @@ const App: React.FC = () => {
   const [scenePrompt, setScenePrompt] = useState<string>('');
   const [artisticStyle, setArtisticStyle] = useState<string>('Cat Air');
 
+  // Auto-load stored API keys on mount
+  useEffect(() => {
+    const stored = getStoredApiKeys();
+    if (stored.length > 0) {
+      setApiKeys(stored);
+      setApiKeysReady(true);
+    }
+  }, []);
+
+  const handleKeysReady = (keys: string[]) => {
+    setApiKeys(keys);
+    setApiKeysReady(true);
+  };
+
+  const handleChangeApiKey = () => {
+    setApiKeysReady(false);
+    resetState();
+  };
 
   const resetState = () => {
     setCurrentStep(1);
@@ -250,16 +270,22 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="bg-[#FEF9E7] min-h-screen flex flex-col font-sans">
-      <Header />
-      <main className="flex-grow container max-w-screen-xl mx-auto px-4 py-8 md:py-12">
-        <div className="max-w-screen-lg mx-auto flex flex-col items-center space-y-8 md:space-y-12">
-          <Stepper steps={STEPS} currentStep={currentStep} />
-          {renderStepContent()}
+    <>
+      {!apiKeysReady ? (
+        <ApiKeySetup onKeysReady={handleKeysReady} />
+      ) : (
+        <div className="bg-[#FEF9E7] min-h-screen flex flex-col font-sans">
+          <Header onChangeApiKey={handleChangeApiKey} />
+          <main className="flex-grow container max-w-screen-xl mx-auto px-4 py-8 md:py-12">
+            <div className="max-w-screen-lg mx-auto flex flex-col items-center space-y-8 md:space-y-12">
+              <Stepper steps={STEPS} currentStep={currentStep} />
+              {renderStepContent()}
+            </div>
+          </main>
+          <Footer />
         </div>
-      </main>
-      <Footer />
-    </div>
+      )}
+    </>
   );
 };
 

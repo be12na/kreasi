@@ -2,11 +2,91 @@ import { GoogleGenAI, Modality } from "@google/genai";
 import type { GenerateContentResponse, Part, GenerateImagesResponse } from "@google/genai";
 import type { ImageData, Look } from "../types";
 
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable is not set");
-}
+// ===== Multi-Key Management =====
+let apiKeys: string[] = [];
+let currentKeyIndex = 0;
+let failedKeys = new Set<string>();
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+export const setApiKeys = (keys: string[]) => {
+  apiKeys = keys.filter(k => k.trim().length > 0);
+  currentKeyIndex = 0;
+  failedKeys.clear();
+};
+
+export const getApiKeys = (): string[] => apiKeys;
+
+const getNextValidKey = (): string => {
+  if (apiKeys.length === 0) {
+    throw new Error('Belum ada API Key. Silakan masukkan API Key Gemini terlebih dahulu.');
+  }
+
+  // Try to find a key that hasn't permanently failed
+  for (let i = 0; i < apiKeys.length; i++) {
+    const idx = (currentKeyIndex + i) % apiKeys.length;
+    if (!failedKeys.has(apiKeys[idx])) {
+      currentKeyIndex = idx;
+      return apiKeys[idx];
+    }
+  }
+
+  // All keys failed, reset and try from beginning
+  failedKeys.clear();
+  currentKeyIndex = 0;
+  return apiKeys[0];
+};
+
+const markKeyFailed = (key: string) => {
+  failedKeys.add(key);
+  // Move to next key
+  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
+};
+
+const createAiClient = (apiKey: string): GoogleGenAI => {
+  return new GoogleGenAI({ apiKey });
+};
+
+// Execute with auto-failover across multiple API keys
+const withFailover = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
+  let lastError: Error | null = null;
+  const triedKeys = new Set<string>();
+
+  for (let attempt = 0; attempt < apiKeys.length; attempt++) {
+    const key = getNextValidKey();
+    if (triedKeys.has(key)) break; // Already tried this key
+    triedKeys.add(key);
+
+    const ai = createAiClient(key);
+    try {
+      return await operation(ai);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const msg = lastError.message.toLowerCase();
+      
+      // Only failover for key-related / quota errors
+      if (msg.includes('api key not valid') || msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted') || msg.includes('permission denied')) {
+        console.warn(`API Key #${attempt + 1} gagal (${msg.substring(0, 80)}), mencoba key berikutnya...`);
+        markKeyFailed(key);
+        continue;
+      }
+      
+      // For other errors (safety, content, etc), don't failover
+      throw lastError;
+    }
+  }
+
+  // All keys exhausted
+  if (lastError) {
+    const msg = lastError.message.toLowerCase();
+    if (msg.includes('api key not valid')) {
+      throw new Error('Semua API Key tidak valid. Coba cek atau ganti API Key-mu.');
+    }
+    if (msg.includes('quota') || msg.includes('rate limit') || msg.includes('resource exhausted')) {
+      throw new Error('Semua API Key sudah habis quota-nya. Tunggu beberapa menit atau tambah API Key baru.');
+    }
+    throw lastError;
+  }
+  throw new Error('Tidak ada API Key yang tersedia.');
+};
 
 
 const lookPrompts = [
@@ -148,19 +228,21 @@ const generateSingleLook = async (
 
   const parts: Part[] = [modelImagePart, textPart, ...productImageParts];
 
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: parts,
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "9:16"
-      }
-    },
-  });
+  return withFailover(async (ai) => {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: parts,
+      },
+      config: {
+        imageConfig: {
+          aspectRatio: "9:16"
+        }
+      },
+    });
 
-  return processImageEditResponse(response);
+    return processImageEditResponse(response);
+  });
 };
 
 
@@ -199,19 +281,21 @@ const generateSingleBrollShot = async (
   
   const textPart: Part = { text: prompt };
 
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [productImagePart, textPart],
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "9:16"
-      }
-    },
-  });
+  return withFailover(async (ai) => {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [productImagePart, textPart],
+      },
+      config: {
+        imageConfig: {
+          aspectRatio: "9:16"
+        }
+      },
+    });
 
-  return processImageEditResponse(response);
+    return processImageEditResponse(response);
+  });
 };
 
 export const generateBroll = async (
@@ -248,19 +332,21 @@ const generateSinglePose = async (
 
   const textPart: Part = { text: prompt };
 
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [modelImagePart, textPart],
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "9:16"
-      }
-    },
-  });
+  return withFailover(async (ai) => {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [modelImagePart, textPart],
+      },
+      config: {
+        imageConfig: {
+          aspectRatio: "9:16"
+        }
+      },
+    });
 
-  return processImageEditResponse(response);
+    return processImageEditResponse(response);
+  });
 };
 
 export const generatePoses = async (
@@ -300,16 +386,18 @@ export const generateScene = async (
       };
       const textPart: Part = { text: prompt };
 
-      const response: GenerateContentResponse = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts: [imagePart, textPart] },
-        config: { 
-          imageConfig: {
-            aspectRatio: "9:16"
-          } 
-        },
+      return withFailover(async (ai) => {
+        const response: GenerateContentResponse = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts: [imagePart, textPart] },
+          config: { 
+            imageConfig: {
+              aspectRatio: "9:16"
+            } 
+          },
+        });
+        return processImageEditResponse(response);
       });
-      return processImageEditResponse(response);
     });
 
     const imageUrls = await Promise.all(imagePromises);
@@ -335,17 +423,19 @@ export const generateCampaignKit = async (
       };
       const textPart: Part = { text: prompt };
 
-      const response: GenerateContentResponse = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts: [imagePart, textPart] },
-        config: {
-          imageConfig: {
-            aspectRatio: format.ratio as "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
-          }
-        },
+      return withFailover(async (ai) => {
+        const response: GenerateContentResponse = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts: [imagePart, textPart] },
+          config: {
+            imageConfig: {
+              aspectRatio: format.ratio as "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
+            }
+          },
+        });
+        const imageUrl = processImageEditResponse(response);
+        return { imageUrl, videoPrompt: null, name: format.name, ratio: format.ratio };
       });
-      const imageUrl = processImageEditResponse(response);
-      return { imageUrl, videoPrompt: null, name: format.name, ratio: format.ratio };
     });
 
     const results = await Promise.all(imagePromises);
@@ -375,16 +465,18 @@ export const generateThemeExploration = async (
       };
       const textPart: Part = { text: prompt };
 
-      const response: GenerateContentResponse = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts: [imagePart, textPart] },
-        config: {
-          imageConfig: {
-            aspectRatio: "1:1"
-          }
-        },
+      return withFailover(async (ai) => {
+        const response: GenerateContentResponse = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts: [imagePart, textPart] },
+          config: {
+            imageConfig: {
+              aspectRatio: "1:1"
+            }
+          },
+        });
+        return processImageEditResponse(response);
       });
-      return processImageEditResponse(response);
     });
 
     const imageUrls = await Promise.all(imagePromises);
@@ -410,27 +502,29 @@ export const generateVideoPrompt = async (
         };
         const textPart: Part = { text: prompt };
 
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: {
-                parts: [imagePart, textPart],
-            },
-        });
+        return withFailover(async (ai) => {
+            const response: GenerateContentResponse = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: {
+                    parts: [imagePart, textPart],
+                },
+            });
 
-        if (response.promptFeedback?.blockReason) {
-             throw new Error(`Request prompt video kamu diblokir sama filter keamanan (${response.promptFeedback.blockReason}).`);
-        }
-
-        const videoPrompt = response.text?.trim();
-
-        if (!videoPrompt) {
-            const candidate = response.candidates?.[0];
-            if (candidate?.finishReason && candidate.finishReason !== 'STOP' && candidate.finishReason !== 'FINISH_REASON_UNSPECIFIED') {
-                throw new Error(`Pembuatan prompt video berhenti karena: ${candidate.finishReason}.`);
+            if (response.promptFeedback?.blockReason) {
+                 throw new Error(`Request prompt video kamu diblokir sama filter keamanan (${response.promptFeedback.blockReason}).`);
             }
-            throw new Error("AI gagal membuat prompt video. Responsnya kosong nih.");
-        }
-        return videoPrompt;
+
+            const videoPrompt = response.text?.trim();
+
+            if (!videoPrompt) {
+                const candidate = response.candidates?.[0];
+                if (candidate?.finishReason && candidate.finishReason !== 'STOP' && candidate.finishReason !== 'FINISH_REASON_UNSPECIFIED') {
+                    throw new Error(`Pembuatan prompt video berhenti karena: ${candidate.finishReason}.`);
+                }
+                throw new Error("AI gagal membuat prompt video. Responsnya kosong nih.");
+            }
+            return videoPrompt;
+        });
 
     } catch (error) {
         parseAndThrowEnhancedError(error);
